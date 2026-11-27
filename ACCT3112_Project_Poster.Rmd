@@ -1,0 +1,175 @@
+---
+output:
+  pdf_document:
+    latex_engine: xelatex
+    fig_caption: true
+documentclass: extarticle
+fontsize: 20pt
+geometry: "paperwidth=841mm, paperheight=594mm, margin=20mm"
+bibliography: references.bib
+nocite: |
+  @doyle2007aq, @clinton2014, @dechow1995, @data_aa, @data_comp, @data_crsp, @data_ibes
+header-includes:
+  - |
+    ```{=latex}
+    \usepackage{multicol}
+    \raggedcolumns
+    \setlength{\columnsep}{20mm}
+    \usepackage{float}
+    \usepackage{booktabs}
+    \usepackage{caption}
+    \captionsetup{font=small}
+    \pagestyle{empty}
+    \setlength{\parskip}{8pt}
+    \newcommand{\bcols}{\begin{multicols}{3}}
+    \newcommand{\ecols}{\end{multicols}}
+    ```
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE,
+                      fig.pos = "H", out.width = "100%", fig.align = "center",
+                      fig.width = 10, fig.height = 4.6)
+library(tidyverse)
+library(broom)
+library(knitr)
+library(kableExtra)
+
+# uses the samples saved by the report (knit the report first)
+em <- readRDS("data/em_sample.rds")
+af <- readRDS("data/af_sample.rds")
+
+est  <- function(m, v) (tidy(m) %>% filter(term == v))$estimate
+pval <- function(m, v) (tidy(m) %>% filter(term == v))$p.value
+supported <- function(m, v) ifelse(pval(m, v) < 0.10 & est(m, v) > 0, "Supported", "Not supported")
+
+m_da  <- lm(ABS_DA ~ MW + RESTATE + SIZE + LEV + MTB + ROA + LOSS + SGROWTH + CFO + RETVOL + factor(fyear) + factor(sic2), data = em)
+m_roa <- lm(ABS_DA_ROA ~ MW + RESTATE + SIZE + LEV + MTB + ROA + LOSS + SGROWTH + CFO + RETVOL + factor(fyear) + factor(sic2), data = em)
+m_fe  <- lm(FE ~ MW + RESTATE + LOGMV + LNUMEST + LEV + MTB + LOSS + RETVOL + factor(fyear) + factor(sic2), data = af)
+```
+
+\begin{center}
+{\fontsize{48}{58}\selectfont\bfseries Do Audit Red Flags Reveal Earnings Management and Hard-to-Forecast Earnings?\par}
+\vspace{8mm}
+{\LARGE Internal control weaknesses, restatements and analyst forecasts: U.S. firms, fiscal 2016--2025\par}
+\vspace{6mm}
+{\Large Group 27: Luk Jay (3036080991) and Tong Kai Yu Ava (3036081098) \quad | \quad ACCT3112 Accounting Data Management and Analytics \quad | \quad The University of Hong Kong\par}
+\end{center}
+\vspace{4mm}
+\hrule
+\vspace{8mm}
+
+\bcols
+
+# Research questions
+
+Under SOX Section 404, firms must report whether their internal control over financial reporting is effective. A restatement means earlier financial statements were wrong. We ask what these two audit-related outcomes tell us about financial reporting.
+
+* **H1:** Firms with a material weakness (MW) have higher absolute discretionary accruals.
+* **H2:** Restated firm-years have higher absolute discretionary accruals.
+* **H3:** Analyst forecast errors are larger for MW firms.
+* **H4:** Analyst forecast errors are larger for restated firm-years.
+
+# Data
+
+Nine datasets from WRDS, downloaded in R: Audit Analytics (SOX 404 internal controls, restatements), Compustat (Fundamentals Annual), CRSP (Monthly Stock File), I/B/E/S (Summary, Detail and Actual EPS), and the CCM and I/B/E/S-CRSP link tables.
+
+```{r tab-sample}
+data.frame(Sample = c("Earnings management", "Analyst forecasts"),
+           `Firm-years` = format(c(nrow(em), nrow(af)), big.mark = ","),
+           Firms = format(c(n_distinct(em$gvkey), n_distinct(af$gvkey)), big.mark = ","),
+           `MW rate` = paste0(round(100 * c(mean(em$MW), mean(af$MW)), 1), "%"),
+           Restated = paste0(round(100 * c(mean(em$RESTATE), mean(af$RESTATE)), 1), "%"),
+           check.names = FALSE) %>%
+  kable(format = "latex", booktabs = TRUE, align = c("l", "r", "r", "r", "r")) %>%
+  kable_styling(position = "center", latex_options = "HOLD_position", font_size = 17)
+```
+
+# Method
+
+**Earnings management:** absolute residual of the modified Jones model (Dechow et al. 1995), estimated for each industry-year with `nest()`, `map()` and `lm()`.
+
+**Forecast error:** $|$actual EPS $-$ median consensus$|$ / share price, using unadjusted I/B/E/S data.
+
+**Regressions:** OLS with year and industry dummies, controlling for size, leverage, market-to-book, ROA, losses, sales growth, cash flow and return volatility (plus number of analysts for forecasts).
+
+\columnbreak
+
+# Material weaknesses and restatements over time
+
+```{r fig-trend, fig.cap="Share of firm-years with a material weakness or a misstated (later restated) year."}
+em %>%
+  group_by(fyear) %>%
+  summarize(`Material weakness` = mean(MW), `Misstated year` = mean(RESTATE)) %>%
+  pivot_longer(-fyear, names_to = "Measure", values_to = "share") %>%
+  ggplot(aes(x = fyear, y = share, color = Measure)) +
+  geom_line(linewidth = 1.5) +
+  geom_point(size = 3) +
+  scale_y_continuous(labels = scales::percent) +
+  scale_x_continuous(breaks = seq(2016, 2025, 2)) +
+  labs(x = NULL, y = NULL, color = NULL) +
+  theme_bw(base_size = 19) +
+  theme(legend.position = "bottom")
+```
+
+# Regression results
+
+```{r fig-coef, fig.cap="MW and RESTATE coefficients with 95\\% confidence intervals (all controls and fixed effects included)."}
+bind_rows(
+  tidy(m_da, conf.int = TRUE) %>% mutate(Model = "ABS_DA"),
+  tidy(m_roa, conf.int = TRUE) %>% mutate(Model = "ABS_DA_ROA"),
+  tidy(m_fe, conf.int = TRUE) %>% mutate(Model = "Forecast error")) %>%
+  filter(term %in% c("MW", "RESTATE")) %>%
+  mutate(Panel = ifelse(Model == "Forecast error", "Analyst forecasts", "Earnings management")) %>%
+  ggplot(aes(x = Model, y = estimate, color = term)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_point(position = position_dodge(width = 0.5), size = 4) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high),
+                position = position_dodge(width = 0.5), width = 0.25) +
+  coord_flip() +
+  facet_wrap(~ Panel, scales = "free") +
+  labs(x = NULL, y = "Coefficient", color = NULL) +
+  theme_bw(base_size = 19) +
+  theme(legend.position = "bottom")
+```
+
+\columnbreak
+
+# Hypothesis tests
+
+```{r tab-hyp}
+data.frame(
+  Hypothesis = c("H1: MW and ABS_DA", "H2: Restatement and ABS_DA",
+                 "H3: MW and forecast error", "H4: Restatement and forecast error"),
+  Coef. = c(est(m_da, "MW"), est(m_da, "RESTATE"), est(m_fe, "MW"), est(m_fe, "RESTATE")),
+  `p-value` = c(pval(m_da, "MW"), pval(m_da, "RESTATE"), pval(m_fe, "MW"), pval(m_fe, "RESTATE")),
+  Result = c(supported(m_da, "MW"), supported(m_da, "RESTATE"), supported(m_fe, "MW"), supported(m_fe, "RESTATE")),
+  check.names = FALSE) %>%
+  kable(format = "latex", booktabs = TRUE, digits = 3, align = c("l", "r", "r", "l")) %>%
+  kable_styling(position = "center", latex_options = "HOLD_position", font_size = 17)
+```
+
+# Key findings
+
+* **Earnings management:** H1 is `r tolower(supported(m_da, "MW"))` and H2 is `r tolower(supported(m_da, "RESTATE"))`. The MW coefficient equals `r round(100 * est(m_da, "MW") / mean(em$ABS_DA), 1)`% of the average ABS_DA.
+* **Analyst forecasts:** H3 is `r tolower(supported(m_fe, "MW"))` and H4 is `r tolower(supported(m_fe, "RESTATE"))`. Analysts make much larger errors for MW firms, but not for restated years.
+* **Controls matter:** MW firms are smaller and report losses more often (`r round(100 * mean(em$LOSS[em$MW == 1]))`% vs `r round(100 * mean(em$LOSS[em$MW == 0]))`% of years).
+
+# Limitations
+
+These are associations, not causal effects. We only see disclosed weaknesses and discovered misstatements, accrual models are noisy, and standard errors are not clustered by firm.
+
+# How we used R
+
+`DBI`, `RPostgres` and `dbplyr` downloaded the data from WRDS. `dplyr` joins linked the databases. `lm()` with `factor()` dummies, `t.test()` and `broom::tidy()` tested the hypotheses, and `ggplot2` and `kable()` made the figures and tables.
+
+# References
+
+\footnotesize
+
+::: {#refs}
+:::
+
+\normalsize
+
+\ecols

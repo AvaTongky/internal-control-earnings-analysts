@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Audit Red Flags, Earnings Management and Analyst Forecasts | Jay Luk</title>
+<meta name="description" content="ACCT3112 final project: do material weaknesses and restatements reveal earnings management and harder-to-forecast earnings? U.S. firms, 2016 to 2025.">
+<style>
+  :root{
+    --bg:#ffffff; --panel:#f6f8fa; --text:#1f2328; --muted:#59636e; --line:#d8dee4;
+    --accent:#1f4e79; --accent-soft:#e8f0f8; --good:#1a7f37; --good-soft:#dafbe1; --no:#9a6700; --no-soft:#fff8c5;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#0d1117; --panel:#161b22; --text:#e6edf3; --muted:#9198a1; --line:#30363d;
+      --accent:#79b8ff; --accent-soft:#1b2a3a; --good:#3fb950; --good-soft:#12261e; --no:#d29922; --no-soft:#272115; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+  a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+  nav{border-bottom:1px solid var(--line)}
+  nav .wrap{display:flex;gap:20px;align-items:center;padding:12px 16px;max-width:860px;margin:0 auto;font-size:15px}
+  nav .wrap a:first-child{margin-right:auto;font-weight:600}
+  .wrap{max-width:860px;margin:0 auto;padding:0 16px}
+  header{padding:40px 0 8px}
+  .kicker{font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:0 0 8px}
+  h1{font-size:32px;line-height:1.2;margin:0 0 12px}
+  .lead{font-size:18px;color:var(--muted);margin:0 0 18px}
+  .btns{display:flex;flex-wrap:wrap;gap:10px;margin:0 0 8px}
+  .btn{border:1px solid var(--accent);padding:8px 16px;border-radius:6px;font-weight:600;font-size:15px}
+  .btn.primary{background:var(--accent);color:var(--bg)}
+  .btn:hover{text-decoration:none;opacity:.88}
+  section{padding:28px 0;border-bottom:1px solid var(--line)}
+  section:last-of-type{border-bottom:0}
+  h2{font-size:22px;margin:0 0 12px}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:18px 0 0}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  .stat b{display:block;font-size:24px;font-variant-numeric:tabular-nums}
+  .stat span{font-size:14px;color:var(--muted)}
+  ul.data{padding-left:20px} ul.data li{margin:4px 0}
+  table{width:100%;border-collapse:collapse;font-size:15px;margin:8px 0 6px}
+  th,td{text-align:left;padding:10px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-size:13px;color:var(--muted);font-weight:600}
+  td.num{font-variant-numeric:tabular-nums;white-space:nowrap}
+  .pill{display:inline-block;padding:2px 10px;border-radius:999px;font-size:13px;font-weight:600;white-space:nowrap}
+  .yes{background:var(--good-soft);color:var(--good)} .no{background:var(--no-soft);color:var(--no)}
+  .note{font-size:14px;color:var(--muted)}
+  figure{margin:20px 0}
+  figure img{width:100%;height:auto;border:1px solid var(--line);border-radius:8px;background:#fff}
+  figcaption{font-size:14px;color:var(--muted);margin-top:6px}
+  .eq{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 14px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:14px;overflow-x:auto}
+  .pdf{width:100%;height:85vh;border:1px solid var(--line);border-radius:8px}
+  footer{text-align:center;color:var(--muted);font-size:13px;padding:24px 16px;border-top:1px solid var(--line)}
+  @media (max-width:600px){ h1{font-size:26px} .pdf{height:70vh} }
+</style>
+</head>
+<body>
+
+<nav><div class="wrap">
+  <a href="/">&larr; Jay Luk</a>
+  <a href="#findings">Findings</a>
+  <a href="#method">Method</a>
+  <a href="#report">Full report</a>
+</div></nav>
+
+<div class="wrap">
+  <header>
+    <p class="kicker">ACCT3112 Final Project &middot; The University of Hong Kong &middot; Luk Jay &amp; Tong Kai Yu Ava</p>
+    <h1>Do Audit Red Flags Reveal Earnings Management and Hard-to-Forecast Earnings?</h1>
+    <p class="lead">When a company reports a material weakness in internal control, or has to restate its accounts, something went wrong in how its numbers were made. We tested whether these firms also manage earnings more, and whether analysts find their earnings harder to predict.</p>
+    <div class="btns">
+      <a class="btn primary" href="ACCT3112_Project_Report.pdf">Read the full report (PDF)</a>
+      <a class="btn" href="ACCT3112_Project_Poster.pdf">Poster (PDF)</a>
+      <a class="btn" href="https://github.com" data-gh="https://github.com/USER/internal-control-earnings-analysts">Code on GitHub</a>
+    </div>
+    <div class="stats">
+      <div class="stat"><b>28,449</b><span>firm-years, 4,989 U.S. firms</span></div>
+      <div class="stat"><b>2016&ndash;2025</b><span>fiscal years covered</span></div>
+      <div class="stat"><b>13%</b><span>of firm-years report a material weakness</span></div>
+      <div class="stat"><b>9.6%</b><span>of firm-years were later restated</span></div>
+    </div>
+  </header>
+
+  <section id="findings">
+    <h2>What we found</h2>
+    <table>
+      <thead><tr><th>Hypothesis</th><th>Coefficient</th><th>t-stat</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><td><b>H1</b> Firms with a material weakness have larger discretionary accruals</td><td class="num">0.024</td><td class="num">15.10</td><td><span class="pill yes">Supported</span></td></tr>
+        <tr><td><b>H2</b> Restated years have larger discretionary accruals</td><td class="num">0.006</td><td class="num">3.66</td><td><span class="pill yes">Supported</span></td></tr>
+        <tr><td><b>H3</b> Analysts make bigger forecast errors for material-weakness firms</td><td class="num">2.026</td><td class="num">9.95</td><td><span class="pill yes">Supported</span></td></tr>
+        <tr><td><b>H4</b> Analysts make bigger forecast errors for restated years</td><td class="num">&minus;0.313</td><td class="num">&minus;1.59</td><td><span class="pill no">Not supported</span></td></tr>
+      </tbody>
+    </table>
+    <p class="note">OLS with year and industry fixed effects and controls for size, leverage, market-to-book, profitability, losses, growth, cash flow and return volatility. Forecast error is measured in % of share price.</p>
+
+    <p>A material weakness goes together with discretionary accruals about 2.4% of total assets higher than at similar firms, roughly 28% of the average, and with forecast errors that are much larger. The effect is strongest when the weakness is reported by <em>management only</em>, which mostly happens at smaller firms where no auditor checks the controls. The more weaknesses a firm discloses, the larger its accruals. Restated years also show more earnings management in our main test, but analysts don't seem to have more trouble forecasting them.</p>
+
+    <figure>
+      <img src="coef.png" alt="Coefficient plot: material weakness has a clearly positive effect on discretionary accruals and forecast error; the restatement effect is positive for accruals and close to zero for forecasts">
+      <figcaption>Effect of each reporting problem with 95% confidence intervals. Points right of the dashed line support the hypotheses.</figcaption>
+    </figure>
+    <figure>
+      <img src="trend.png" alt="Line chart from 2016 to 2025: the material weakness rate rises from about 9% to about 16%, while restatement rates fall">
+      <figcaption>Material weaknesses rose from 9.1% of firm-years in 2016 to 16.4% in 2025. Restatement rates fall at the end partly because recent errors have not been discovered yet.</figcaption>
+    </figure>
+  </section>
+
+  <section id="method">
+    <h2>Data and method</h2>
+    <p>All data come from Wharton Research Data Services (WRDS), downloaded directly into R. The data are licensed, so they are not included in this repository; anyone with WRDS access can rebuild them by knitting the R Markdown file.</p>
+    <ul class="data">
+      <li><b>Audit Analytics:</b> SOX 404 internal control opinions (effectiveness, auditor vs management, number of weaknesses) and financial restatements (restated period, filing date, type).</li>
+      <li><b>Compustat:</b> annual financial statements for accruals and control variables.</li>
+      <li><b>CRSP:</b> monthly stock prices, shares and returns.</li>
+      <li><b>I/B/E/S:</b> analyst consensus forecasts, individual analyst forecasts and actual EPS.</li>
+      <li><b>Linking tables:</b> CRSP&ndash;Compustat (CCM) and I/B/E/S&ndash;CRSP, to match firms across databases.</li>
+    </ul>
+    <p><b>Earnings management.</b> For every industry and year we estimate the modified Jones model and use the absolute residual, the part of accruals that sales growth and fixed assets can't explain:</p>
+    <p class="eq">TA = &alpha; + &beta;<sub>1</sub>(1/A<sub>t&minus;1</sub>) + &beta;<sub>2</sub>(&Delta;REV &minus; &Delta;REC)/A<sub>t&minus;1</sub> + &beta;<sub>3</sub>PPE/A<sub>t&minus;1</sub> + &epsilon;</p>
+    <p><b>Forecast accuracy.</b> Forecast error = |actual EPS &minus; median consensus| / share price, using unadjusted I/B/E/S data so that forecasts, actuals and prices are on the same per-share basis.</p>
+    <p><b>In R.</b> We used <code>dbplyr</code> to query WRDS, <code>dplyr</code> joins to link the databases, <code>nest()</code> + <code>map()</code> + <code>lm()</code> to run hundreds of industry-year regressions, <code>lm()</code> with year and industry dummies for the tests, and <code>ggplot2</code> and <code>stargazer</code> for the figures and tables.</p>
+    <p><b>Robustness.</b> The material weakness results hold in every check: a performance-adjusted accrual measure, a consensus rebuilt from individual analyst forecasts, and dropping the two most recent years. The restatement result for accruals is less robust. It gets stronger when we drop the two most recent years (t = 4.07), but becomes insignificant with the performance-adjusted measure or when restatements are dated by their announcement.</p>
+  </section>
+
+  <section id="report">
+    <h2>Full report</h2>
+    <p>The complete report with all tables, robustness tests and the R code appendix. If it doesn't show below, <a href="ACCT3112_Project_Report.pdf">open the PDF</a>.</p>
+    <object class="pdf" data="ACCT3112_Project_Report.pdf" type="application/pdf">
+      <p><a href="ACCT3112_Project_Report.pdf">Download the report (PDF)</a></p>
+    </object>
+  </section>
+</div>
+
+<footer>Jay Luk &middot; ACCT3112 Accounting Data Management and Analytics &middot; <a href="/">Back to my website</a></footer>
+
+<script>
+  var host = window.location.hostname;
+  if (host.slice(-10) === ".github.io") {
+    var user = host.split(".")[0];
+    document.querySelectorAll("[data-gh]").forEach(function (a) {
+      a.href = a.getAttribute("data-gh").replace("USER", user);
+    });
+  }
+</script>
+</body>
+</html>

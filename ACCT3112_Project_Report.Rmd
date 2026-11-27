@@ -1,0 +1,901 @@
+---
+title: "Internal Control Weaknesses, Restatements, Earnings Management and Analyst Forecast Accuracy"
+subtitle: "ACCT3112 Accounting Data Management and Analytics -- Final Project Report"
+author: "Group 27: Luk Jay (3036080991), Tong Kai Yu Ava (3036081098)"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+abstract: |
+  When a firm reports a material weakness in internal control, or has to restate its financial statements, it tells us that something went wrong in how its numbers were produced. In this project we test whether U.S. firms with these problems also show more earnings management, measured by absolute discretionary accruals, and whether analysts have a harder time forecasting their earnings. We use nine datasets from Audit Analytics, Compustat, CRSP and I/B/E/S for fiscal years 2016 to 2025, estimate discretionary accruals with the modified Jones model, and run OLS regressions with year and industry fixed effects. All the data work, tables and figures are done in R inside this R Markdown file.
+output:
+  pdf_document:
+    latex_engine: xelatex
+    number_sections: true
+    toc: true
+    toc_depth: 2
+    fig_caption: true
+geometry: margin=1in
+fontsize: 11pt
+linestretch: 1.15
+linkcolor: blue
+urlcolor: blue
+citecolor: blue
+bibliography: references.bib
+link-citations: true
+header-includes:
+  - |
+    ```{=latex}
+    \usepackage{float}
+    \usepackage{booktabs}
+    \usepackage{dcolumn}
+    \usepackage{caption}
+    \captionsetup{font=small, labelfont=bf}
+    \usepackage{fancyhdr}
+    \pagestyle{fancy}
+    \fancyhf{}
+    \fancyhead[L]{\small ACCT3112 Final Project}
+    \fancyhead[R]{\small Internal Control, Restatements and Analysts}
+    \fancyfoot[C]{\thepage}
+    \usepackage{fvextra}
+    \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,commandchars=\\\{\}}
+    ```
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE,
+                      fig.align = "center", fig.pos = "H", out.width = "90%",
+                      fig.width = 7.5, fig.height = 4)
+
+library(tidyverse)    # dplyr, tidyr, purrr, ggplot2
+library(lubridate)
+library(DBI)
+library(RPostgres)
+library(dbplyr)
+library(broom)
+library(knitr)
+library(kableExtra)
+library(stargazer)
+
+options(dplyr.summarise.inform = FALSE)
+
+start_year <- 2016
+end_year   <- 2025
+
+wins <- function(x) {
+  q <- quantile(x, c(0.01, 0.99), na.rm = TRUE)
+  ifelse(x < q[1], q[1], ifelse(x > q[2], q[2], x))
+}
+
+est  <- function(m, v) (tidy(m) %>% filter(term == v))$estimate
+tval <- function(m, v) (tidy(m) %>% filter(term == v))$statistic
+pval <- function(m, v) (tidy(m) %>% filter(term == v))$p.value
+
+result_text <- function(m, v) {
+  if (pval(m, v) < 0.10 & est(m, v) > 0) {
+    "positive and statistically significant"
+  } else if (pval(m, v) < 0.10) {
+    "negative and statistically significant"
+  } else {
+    "not statistically significant"
+  }
+}
+supported <- function(m, v) ifelse(pval(m, v) < 0.10 & est(m, v) > 0, "Supported", "Not supported")
+```
+
+```{r download-data, include=FALSE}
+dir.create("data", showWarnings = FALSE)
+
+needed <- c("funda", "company", "ccm", "msf2", "ibes_fc", "ibes_act", "ibes_det",
+            "iclink", "sox2", "restate2")
+
+if (!all(file.exists(paste0("data/", needed, ".rds")))) {
+
+  wrds_user <- Sys.getenv("WRDS_USER")
+  wrds_pass <- Sys.getenv("WRDS_PASSWORD")
+  if (wrds_user == "") wrds_user <- rstudioapi::showPrompt("WRDS", "WRDS username")
+  if (wrds_pass == "") wrds_pass <- rstudioapi::askForPassword("WRDS password")
+
+  con <- dbConnect(
+    Postgres(),
+    host = "wrds-pgdata.wharton.upenn.edu",
+    port = 9737,
+    sslmode = "require",
+    dbname = "wrds",
+    user = wrds_user,
+    password = wrds_pass
+  )
+
+  if (!file.exists("data/funda.rds")) {
+    funda <- con %>%
+      tbl(in_schema("comp", "funda")) %>%
+      filter(indfmt == "INDL", datafmt == "STD", popsrc == "D", consol == "C",
+             fyear >= 2015, fyear <= 2025) %>%
+      select(gvkey, datadate, fyear, at, lt, ceq, sale, rect, ppegt,
+             ib, oancf, xidoc, prcc_f, csho) %>%
+      collect()
+    saveRDS(funda, "data/funda.rds")
+  }
+
+  if (!file.exists("data/company.rds")) {
+    company <- con %>%
+      tbl(in_schema("comp", "company")) %>%
+      select(gvkey, conm, cik, sic) %>%
+      collect()
+    saveRDS(company, "data/company.rds")
+  }
+
+  if (!file.exists("data/ccm.rds")) {
+    ccm <- con %>%
+      tbl(in_schema("crsp", "ccmxpf_lnkhist")) %>%
+      filter(linktype %in% c("LU", "LC"), linkprim %in% c("P", "C")) %>%
+      select(gvkey, lpermno, linkdt, linkenddt) %>%
+      collect()
+    saveRDS(ccm, "data/ccm.rds")
+  }
+
+  if (!file.exists("data/msf2.rds")) {
+    msf <- con %>%
+      tbl(in_schema("crsp", "msf_v2")) %>%
+      filter(mthcaldt >= as.Date("2015-01-01"), mthcaldt <= as.Date("2026-12-31")) %>%
+      select(permno, mthcaldt, mthret, mthprc, contains("shrout")) %>%
+      collect()
+    saveRDS(msf, "data/msf2.rds")
+  }
+
+  if (!file.exists("data/ibes_fc.rds")) {
+    ibes_fc <- con %>%
+      tbl(in_schema("ibes", "statsumu_epsus")) %>%
+      filter(fpi == "1", measure == "EPS",
+             fpedats >= as.Date("2016-01-01"), fpedats <= as.Date("2026-06-30")) %>%
+      select(ticker, statpers, fpedats, numest, medest, stdev) %>%
+      collect()
+    saveRDS(ibes_fc, "data/ibes_fc.rds")
+  }
+
+  if (!file.exists("data/ibes_act.rds")) {
+    ibes_act <- con %>%
+      tbl(in_schema("ibes", "actu_epsus")) %>%
+      filter(pdicity == "ANN", measure == "EPS",
+             pends >= as.Date("2016-01-01"), pends <= as.Date("2026-06-30")) %>%
+      select(ticker, pends, anndats, value) %>%
+      collect()
+    saveRDS(ibes_act, "data/ibes_act.rds")
+  }
+
+  if (!file.exists("data/ibes_det.rds")) {
+    ibes_det <- con %>%
+      tbl(in_schema("ibes", "detu_epsus")) %>%
+      filter(fpi == "1", measure == "EPS",
+             fpedats >= as.Date("2016-01-01"), fpedats <= as.Date("2026-06-30"),
+             anndats <= fpedats) %>%
+      select(ticker, analys, value, anndats, fpedats) %>%
+      collect()
+    saveRDS(ibes_det, "data/ibes_det.rds")
+  }
+
+  if (!file.exists("data/iclink.rds")) {
+    iclink <- con %>%
+      tbl(in_schema("wrdsapps_link_crsp_ibes", "ibcrsphist")) %>%
+      select(ticker, permno, sdate, edate, score) %>%
+      collect()
+    saveRDS(iclink, "data/iclink.rds")
+  }
+
+  if (!file.exists("data/sox2.rds")) {
+    sox_raw <- con %>%
+      tbl(in_schema("audit_audit_comp", "feed11_sox_404_internal_controls")) %>%
+      select(company_fkey, fye_ic_op, ic_is_effective, contains("op_type"), contains("count_weak")) %>%
+      collect()
+    saveRDS(sox_raw, "data/sox2.rds")
+  }
+
+  if (!file.exists("data/restate2.rds")) {
+    res_tables <- dbGetQuery(con, "
+      SELECT table_schema, table_name
+      FROM information_schema.columns
+      WHERE table_schema LIKE 'audit%' AND column_name = 'res_begin_date'
+      ORDER BY table_schema, table_name")
+    print(res_tables)
+    if (nrow(res_tables) == 0) stop("No Audit Analytics restatement table found in your WRDS account.")
+    res_schema <- res_tables$table_schema[1]
+    res_table  <- res_tables$table_name[1]
+    saveRDS(paste0(res_schema, ".", res_table), "data/restate_table_name.rds")
+
+    restate <- con %>%
+      tbl(in_schema(res_schema, res_table)) %>%
+      select(company_fkey, file_date, res_begin_date, res_end_date,
+             contains("fraud"), contains("adverse")) %>%
+      collect()
+    saveRDS(restate, "data/restate2.rds")
+  }
+
+  dbDisconnect(con)
+}
+
+funda    <- readRDS("data/funda.rds")
+company  <- readRDS("data/company.rds")
+ccm      <- readRDS("data/ccm.rds")
+msf      <- readRDS("data/msf2.rds")
+ibes_fc  <- readRDS("data/ibes_fc.rds")
+ibes_act <- readRDS("data/ibes_act.rds")
+ibes_det <- readRDS("data/ibes_det.rds")
+iclink   <- readRDS("data/iclink.rds")
+sox_raw  <- readRDS("data/sox2.rds")
+restate  <- readRDS("data/restate2.rds")
+```
+
+```{r compustat}
+company <- company %>%
+  mutate(cik = as.numeric(cik), sic = as.numeric(sic))
+
+comp <- funda %>%
+  mutate(fyear = as.numeric(fyear), datadate = as.Date(datadate)) %>%
+  distinct(gvkey, fyear, .keep_all = TRUE) %>%
+  left_join(company, by = "gvkey") %>%
+  arrange(gvkey, fyear) %>%
+  group_by(gvkey) %>%
+  mutate(lag_at   = ifelse(fyear - lag(fyear) == 1, lag(at), NA),
+         lag_sale = ifelse(fyear - lag(fyear) == 1, lag(sale), NA),
+         lag_rect = ifelse(fyear - lag(fyear) == 1, lag(rect), NA)) %>%
+  ungroup() %>%
+  filter(fyear >= start_year, fyear <= end_year)
+n_comp <- nrow(comp)
+
+comp <- comp %>%
+  filter(!is.na(sic), !(sic >= 6000 & sic <= 6999), !(sic >= 4900 & sic <= 4999)) %>%
+  mutate(sic2 = floor(sic / 100))
+n_nonfin <- nrow(comp)
+
+comp <- comp %>%
+  mutate(ta      = (ib - (oancf - ifelse(is.na(xidoc), 0, xidoc))) / lag_at,
+         inv_at  = 1 / lag_at,
+         drev    = (sale - lag_sale) / lag_at,
+         drec    = (rect - lag_rect) / lag_at,
+         ppe     = ppegt / lag_at,
+         ROA     = ib / lag_at,
+         CFO     = (oancf - ifelse(is.na(xidoc), 0, xidoc)) / lag_at,
+         SIZE    = log(at),
+         LEV     = lt / at,
+         MTB     = ifelse(ceq > 0, prcc_f * csho / ceq, NA),
+         LOSS    = ifelse(ib < 0, 1, 0),
+         SGROWTH = ifelse(lag_sale > 0, sale / lag_sale - 1, NA)) %>%
+  filter(lag_at >= 1, !is.na(ta), !is.na(drev), !is.na(drec), !is.na(ppe), !is.na(ROA)) %>%
+  mutate(across(c(ta, drev, drec, ppe, ROA), wins))
+n_accr <- nrow(comp)
+```
+
+```{r accruals}
+comp_da <- comp %>%
+  group_by(sic2, fyear) %>%
+  filter(n() >= 10) %>%
+  nest() %>%
+  mutate(reg_mj  = map(data, ~ lm(ta ~ inv_at + I(drev - drec) + ppe, data = .)),
+         reg_roa = map(data, ~ lm(ta ~ inv_at + I(drev - drec) + ppe + ROA, data = .)),
+         DA      = map(reg_mj, resid),
+         DA_ROA  = map(reg_roa, resid)) %>%
+  select(-reg_mj, -reg_roa) %>%
+  unnest(c(data, DA, DA_ROA)) %>%
+  ungroup()
+n_da <- nrow(comp_da)
+```
+
+```{r audit-analytics}
+if ("ic_op_type" %in% names(sox_raw)) {
+  sox_raw$AUDITOR <- ifelse(tolower(substr(sox_raw$ic_op_type, 1, 1)) == "a", 1, 0)
+} else {
+  sox_raw$AUDITOR <- 0
+}
+if ("count_weak" %in% names(sox_raw)) {
+  sox_raw$NWEAK <- as.numeric(sox_raw$count_weak)
+} else {
+  sox_raw$NWEAK <- NA
+}
+
+sox <- sox_raw %>%
+  mutate(cik = as.numeric(company_fkey),
+         fye = as.Date(fye_ic_op),
+         eff = as.character(ic_is_effective),
+         fyear = ifelse(month(fye) <= 5, year(fye) - 1, year(fye)),
+         MW = case_when(
+           eff %in% c("0", "N", "n", "No", "no", "FALSE", "false", "Ineffective") ~ 1,
+           eff %in% c("1", "Y", "y", "Yes", "yes", "TRUE", "true", "Effective") ~ 0,
+           TRUE ~ NA_real_)) %>%
+  filter(!is.na(cik), !is.na(fyear), !is.na(MW)) %>%
+  group_by(cik, fyear) %>%
+  summarize(MWAUD = ifelse(any(MW == 1 & AUDITOR == 1, na.rm = TRUE), 1, 0),
+            NWEAK = max(c(0, NWEAK), na.rm = TRUE),
+            MW = max(MW)) %>%
+  ungroup() %>%
+  mutate(MWMGT = ifelse(MW == 1 & MWAUD == 0, 1, 0),
+         LOGNWEAK = log(1 + NWEAK))
+
+if (nrow(sox) == 0) {
+  stop("No SOX 404 records could be coded. Check table(sox_raw$ic_is_effective).")
+}
+
+
+restate <- restate %>%
+  mutate(cik = as.numeric(company_fkey),
+         file_date = as.Date(file_date),
+         res_begin_date = as.Date(res_begin_date),
+         res_end_date = as.Date(res_end_date))
+
+
+
+restate$SERIOUS <- 0
+for (v in grep("fraud|adverse", names(restate), value = TRUE)) {
+  restate$SERIOUS <- ifelse(as.character(restate[[v]]) %in% c("1", "Y", "y", "T", "TRUE", "true"),
+                            1, restate$SERIOUS)
+}
+
+firm_years <- comp_da %>% select(gvkey, fyear, cik, datadate)
+
+res_mis <- firm_years %>%
+  inner_join(restate, by = "cik") %>%
+  filter(res_begin_date <= datadate, res_end_date > datadate - 365) %>%
+  group_by(gvkey, fyear) %>%
+  summarize(RESSER = max(SERIOUS)) %>%
+  ungroup() %>%
+  mutate(RESTATE = 1)
+
+
+res_ann <- firm_years %>%
+  inner_join(restate, by = "cik") %>%
+  filter(file_date > datadate - 365, file_date <= datadate) %>%
+  distinct(gvkey, fyear) %>%
+  mutate(RESANN = 1)
+```
+
+```{r crsp}
+ccm <- ccm %>%
+  mutate(permno = as.numeric(lpermno),
+         linkdt = as.Date(linkdt),
+         linkenddt = as.Date(linkenddt))
+
+comp_permno <- comp_da %>%
+  select(gvkey, fyear, datadate) %>%
+  inner_join(ccm, by = "gvkey") %>%
+  filter(datadate >= linkdt, is.na(linkenddt) | datadate <= linkenddt) %>%
+  distinct(gvkey, fyear, .keep_all = TRUE) %>%
+  select(gvkey, fyear, permno)
+
+if (!"shrout" %in% names(msf)) msf$shrout <- NA
+
+msf <- msf %>%
+  mutate(permno = as.numeric(permno), mthcaldt = as.Date(mthcaldt),
+         ym = year(mthcaldt) * 100 + month(mthcaldt))
+
+crsp_vol <- comp_da %>%
+  select(gvkey, fyear, datadate) %>%
+  inner_join(comp_permno, by = c("gvkey", "fyear")) %>%
+  inner_join(msf, by = "permno") %>%
+  filter(mthcaldt > datadate - 365, mthcaldt <= datadate) %>%
+  group_by(gvkey, fyear, permno) %>%
+  summarize(RETVOL = sd(mthret, na.rm = TRUE), n_months = n()) %>%
+  ungroup() %>%
+  filter(n_months >= 6)
+```
+
+```{r em-sample}
+base <- comp_da %>%
+  inner_join(sox, by = c("cik", "fyear")) %>%
+  left_join(res_mis, by = c("gvkey", "fyear")) %>%
+  left_join(res_ann, by = c("gvkey", "fyear")) %>%
+  mutate(RESTATE = ifelse(is.na(RESTATE), 0, RESTATE),
+         RESSER = ifelse(is.na(RESSER), 0, RESSER),
+         RESOTH = RESTATE - RESSER,
+         RESANN = ifelse(is.na(RESANN), 0, RESANN))
+n_aa <- nrow(base)
+
+em <- base %>%
+  inner_join(crsp_vol, by = c("gvkey", "fyear")) %>%
+  filter(!is.na(DA), !is.na(SIZE), !is.na(LEV), !is.na(MTB), !is.na(SGROWTH),
+         !is.na(CFO), !is.na(RETVOL)) %>%
+  mutate(across(c(DA, DA_ROA, SIZE, LEV, MTB, SGROWTH, CFO, RETVOL), wins),
+         ABS_DA = abs(DA),
+         ABS_DA_ROA = abs(DA_ROA),
+         MW_group = ifelse(MW == 1, "MW firm", "No MW"),
+         RES_group = ifelse(RESTATE == 1, "Restated year", "Not restated"))
+n_em <- nrow(em)
+saveRDS(em, "data/em_sample.rds")
+```
+
+```{r af-sample}
+consensus <- ibes_fc %>%
+  mutate(statpers = as.Date(statpers), fpedats = as.Date(fpedats)) %>%
+  filter(statpers <= fpedats, !is.na(medest)) %>%
+  group_by(ticker, fpedats) %>%
+  slice_max(statpers, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+actual <- ibes_act %>%
+  mutate(pends = as.Date(pends), anndats = as.Date(anndats)) %>%
+  filter(!is.na(value)) %>%
+  arrange(ticker, pends, anndats) %>%
+  distinct(ticker, pends, .keep_all = TRUE)
+
+iclink <- iclink %>%
+  mutate(permno = as.numeric(permno), sdate = as.Date(sdate), edate = as.Date(edate)) %>%
+  filter(score <= 2)
+
+detail <- ibes_det %>%
+  mutate(anndats = as.Date(anndats), fpedats = as.Date(fpedats)) %>%
+  filter(!is.na(value), anndats <= fpedats, anndats > fpedats - 90) %>%
+  arrange(ticker, fpedats, analys, desc(anndats)) %>%
+  distinct(ticker, fpedats, analys, .keep_all = TRUE) %>%
+  group_by(ticker, fpedats) %>%
+  summarize(DET_MEDIAN = median(value), DET_N = n()) %>%
+  ungroup()
+
+ibes <- consensus %>%
+  inner_join(actual, by = c("ticker", "fpedats" = "pends")) %>%
+  left_join(detail, by = c("ticker", "fpedats")) %>%
+  inner_join(iclink, by = "ticker") %>%
+  filter(fpedats >= sdate, fpedats <= edate) %>%
+  arrange(ticker, fpedats, score) %>%
+  distinct(ticker, fpedats, .keep_all = TRUE) %>%
+  mutate(ym = year(fpedats) * 100 + month(fpedats),
+         st_ym = year(statpers) * 100 + month(statpers))
+n_ibes_all <- nrow(ibes)
+
+price <- msf %>% select(permno, st_ym = ym, mthprc, shrout)
+
+af <- em %>%
+  mutate(ym = year(datadate) * 100 + month(datadate)) %>%
+  inner_join(ibes %>% select(permno, ym, st_ym, numest, medest, stdev, value, DET_MEDIAN),
+             by = c("permno", "ym")) %>%
+  inner_join(price, by = c("permno", "st_ym")) %>%
+  mutate(PRICE = abs(mthprc)) %>%
+  filter(PRICE >= 1) %>%
+  mutate(FE      = 100 * abs(value - medest) / PRICE,
+         BIAS    = 100 * (value - medest) / PRICE,
+         DISP    = ifelse(numest >= 2, 100 * stdev / PRICE, NA),
+         FEDET   = 100 * abs(value - DET_MEDIAN) / PRICE,
+         LNUMEST = log(numest),
+         LOGMV   = ifelse(is.na(shrout), log(prcc_f * csho), log(PRICE * shrout / 1000))) %>%
+  filter(!is.na(LOGMV), is.finite(LOGMV)) %>%
+  mutate(across(c(FE, BIAS, DISP, FEDET, LOGMV), wins))
+n_af <- nrow(af)
+saveRDS(af, "data/af_sample.rds")
+```
+
+```{r regressions}
+em1 <- lm(ABS_DA ~ MW + SIZE + LEV + MTB + ROA + LOSS + SGROWTH + CFO + RETVOL + factor(fyear) + factor(sic2), data = em)
+em2 <- lm(ABS_DA ~ RESTATE + SIZE + LEV + MTB + ROA + LOSS + SGROWTH + CFO + RETVOL + factor(fyear) + factor(sic2), data = em)
+em3 <- lm(ABS_DA ~ MW + RESTATE + SIZE + LEV + MTB + ROA + LOSS + SGROWTH + CFO + RETVOL + factor(fyear) + factor(sic2), data = em)
+em4 <- lm(ABS_DA_ROA ~ MW + RESTATE + SIZE + LEV + MTB + ROA + LOSS + SGROWTH + CFO + RETVOL + factor(fyear) + factor(sic2), data = em)
+
+sg1 <- lm(DA ~ MW + RESTATE + SIZE + LEV + MTB + ROA + LOSS + SGROWTH + CFO + RETVOL + factor(fyear) + factor(sic2), data = em)
+sg2 <- lm(ABS_DA ~ MW + RESTATE + SIZE + LEV + MTB + ROA + LOSS + SGROWTH + CFO + RETVOL + factor(fyear) + factor(sic2), data = filter(em, DA > 0))
+sg3 <- lm(ABS_DA ~ MW + RESTATE + SIZE + LEV + MTB + ROA + LOSS + SGROWTH + CFO + RETVOL + factor(fyear) + factor(sic2), data = filter(em, DA < 0))
+
+af1 <- lm(FE ~ MW + LOGMV + LNUMEST + LEV + MTB + LOSS + RETVOL + factor(fyear) + factor(sic2), data = af)
+af2 <- lm(FE ~ RESTATE + LOGMV + LNUMEST + LEV + MTB + LOSS + RETVOL + factor(fyear) + factor(sic2), data = af)
+af3 <- lm(FE ~ MW + RESTATE + LOGMV + LNUMEST + LEV + MTB + LOSS + RETVOL + factor(fyear) + factor(sic2), data = af)
+af4 <- lm(DISP ~ MW + RESTATE + LOGMV + LNUMEST + LEV + MTB + LOSS + RETVOL + factor(fyear) + factor(sic2), data = filter(af, !is.na(DISP)))
+af5 <- lm(BIAS ~ MW + RESTATE + LOGMV + LNUMEST + LEV + MTB + LOSS + RETVOL + factor(fyear) + factor(sic2), data = af)
+
+rb1 <- lm(ABS_DA ~ MW + RESANN + SIZE + LEV + MTB + ROA + LOSS + SGROWTH + CFO + RETVOL + factor(fyear) + factor(sic2), data = em)
+rb2 <- lm(ABS_DA ~ MW + RESTATE + SIZE + LEV + MTB + ROA + LOSS + SGROWTH + CFO + RETVOL + factor(fyear) + factor(sic2), data = filter(em, fyear <= end_year - 2))
+rb3 <- lm(FE ~ MW + RESANN + LOGMV + LNUMEST + LEV + MTB + LOSS + RETVOL + factor(fyear) + factor(sic2), data = af)
+rb4 <- lm(FE ~ MW + RESTATE + LOGMV + LNUMEST + LEV + MTB + LOSS + RETVOL + factor(fyear) + factor(sic2), data = filter(af, fyear <= end_year - 2))
+
+ad1 <- lm(ABS_DA ~ MWAUD + MWMGT + RESTATE + SIZE + LEV + MTB + ROA + LOSS + SGROWTH + CFO + RETVOL + factor(fyear) + factor(sic2), data = em)
+ad2 <- lm(ABS_DA ~ LOGNWEAK + RESTATE + SIZE + LEV + MTB + ROA + LOSS + SGROWTH + CFO + RETVOL + factor(fyear) + factor(sic2), data = em)
+ad3 <- lm(ABS_DA ~ MW + RESSER + RESOTH + SIZE + LEV + MTB + ROA + LOSS + SGROWTH + CFO + RETVOL + factor(fyear) + factor(sic2), data = em)
+ad4 <- lm(FE ~ MWAUD + MWMGT + RESSER + RESOTH + LOGMV + LNUMEST + LEV + MTB + LOSS + RETVOL + factor(fyear) + factor(sic2), data = af)
+ad5 <- lm(FEDET ~ MW + RESTATE + LOGMV + LNUMEST + LEV + MTB + LOSS + RETVOL + factor(fyear) + factor(sic2), data = filter(af, !is.na(FEDET)))
+
+fe_lines <- function(k) list(c("Year fixed effects", rep("Yes", k)),
+                             c("Industry (SIC2) fixed effects", rep("Yes", k)))
+```
+
+\newpage
+
+# Executive summary
+
+We study `r format(n_em, big.mark = ",")` U.S. non-financial firm-years from fiscal `r start_year` to `r end_year` (`r format(n_distinct(em$gvkey), big.mark = ",")` firms) that have a SOX 404 internal control assessment in Audit Analytics and the Compustat and CRSP data we need. `r round(100 * mean(em$MW), 1)`% of these firm-years report a material weakness and `r round(100 * mean(em$RESTATE), 1)`% fall in a period that was later restated. For `r format(n_af, big.mark = ",")` firm-years we can also measure the accuracy of the analyst consensus forecast from I/B/E/S.
+
+* **H1 (material weakness and earnings management):** after controls and fixed effects, the MW coefficient in the absolute discretionary accrual regression is `r result_text(em3, "MW")` (`r round(est(em3, "MW"), 4)`, t = `r round(tval(em3, "MW"), 2)`). H1 is **`r tolower(supported(em3, "MW"))`**.
+* **H2 (restatement and earnings management):** the RESTATE coefficient is `r result_text(em3, "RESTATE")` (`r round(est(em3, "RESTATE"), 4)`, t = `r round(tval(em3, "RESTATE"), 2)`). H2 is **`r tolower(supported(em3, "RESTATE"))`**.
+* **H3 (material weakness and forecast accuracy):** the MW coefficient in the forecast-error regression is `r result_text(af3, "MW")` (`r round(est(af3, "MW"), 3)`, t = `r round(tval(af3, "MW"), 2)`). H3 is **`r tolower(supported(af3, "MW"))`**.
+* **H4 (restatement and forecast accuracy):** the RESTATE coefficient is `r result_text(af3, "RESTATE")` (`r round(est(af3, "RESTATE"), 3)`, t = `r round(tval(af3, "RESTATE"), 2)`). H4 is **`r tolower(supported(af3, "RESTATE"))`**.
+
+# Introduction
+
+When investors read a company's financial statements, they only see the final numbers. They can't see how those numbers were put together inside the firm. But there are a few signals that come from the audit and regulatory side. Under Section 404 of the Sarbanes-Oxley Act [@sox2002], management has to say every year whether its internal control over financial reporting (ICFR) is effective, and for bigger companies the auditor has to give an opinion too. If there is a *material weakness*, it means a material misstatement could happen and not be caught in time. A *restatement* is when the company admits that financial statements it already published were wrong and has to fix them.
+
+In this project we want to see what these two audit-related outcomes can tell us about a firm's financial reporting. We look at two questions:
+
+1. **Do firms with material weaknesses, or firms whose statements are later restated, engage in more earnings management?** We measure earnings management with absolute discretionary accruals, the most common accrual-based measure in the literature [@dechow2010].
+2. **Do analysts find it harder to forecast the earnings of these firms?** If weak controls make reported earnings noisier, or a restatement makes past numbers less reliable, analysts should make larger forecast errors [@lang1996; @clinton2014].
+
+The rest of the report is organised like this. Section 3 explains our hypotheses, Section 4 describes the data and how we built the sample, and Section 5 gives an overview of the data. Sections 6 to 8 show the results, Section 9 discusses what we found, and Section 10 explains how we used R.
+
+# Background and hypotheses
+
+**Internal control and earnings management.** Internal controls are there to make sure transactions are recorded properly and in the right period, and that estimates like allowances and reserves get checked by someone. When these controls are weak, honest mistakes are less likely to be caught, and a manager who wants to push the numbers has an easier time doing it. Either way, we would expect bigger discretionary accruals. This is in line with earlier research: @doyle2007aq find that material weaknesses come with lower accrual quality, and @ashbaugh2008 find that firms with control problems have both larger positive *and* larger negative abnormal accruals. @doyle2007det also show that firms with weaknesses tend to be smaller, younger and in weaker financial shape, so we need to control for these things.
+
+> **H1:** Firms with material weaknesses in internal control have higher absolute discretionary accruals than firms without material weaknesses.
+
+**Restatements and earnings management.** A restatement basically proves that earlier numbers were wrong. If those errors came from aggressive estimates, then the years that were later restated should have unusual accruals in the numbers that were first reported. So we set RESTATE = 1 for fiscal years that fall inside a period the firm later restated.
+
+> **H2:** Firm-years that are later restated have higher absolute discretionary accruals than other firm-years.
+
+**Analyst forecasts.** Analysts build their forecasts mostly from past financial statements and what management tells them. @clinton2014 find that analyst forecasts are less accurate and more spread out for firms with ineffective internal control. Restatements also hurt the credibility of past earnings. The stock market reacts quite negatively when a restatement is announced [@palmrose2004], and restatements lead to lower expected earnings and a higher cost of capital [@hribar2004]. So we think analysts should find these firms harder to forecast.
+
+> **H3:** Analyst forecast errors are larger for firms with material weaknesses.
+>
+> **H4:** Analyst forecast errors are larger for firm-years affected by restatements.
+
+These are the same four hypotheses we planned at the start. We made two small additions. First, we also put MW and RESTATE in the same regression, because the two problems often happen together and we wanted to see if each one still matters on its own. Second, we look at forecast dispersion and forecast bias as well as accuracy, so we can see *how* analysts are affected and not only whether they are.
+
+# Data and sample
+
+## Data sources
+
+All data come from Wharton Research Data Services (WRDS) and are downloaded in this file with `DBI`, `RPostgres` and `dbplyr`, the same way as in Tutorial 3. Table \ref{tab:tab-sources} lists the nine datasets, the variables we take from each and the hypotheses they serve. The Compustat company header is used together with Fundamentals Annual because it carries the CIK and SIC code needed to link Audit Analytics and to define industries.
+
+```{r tab-sources}
+sources <- data.frame(
+  No. = 1:9,
+  Dataset = c("Audit Analytics: SOX 404 Internal Controls", "Audit Analytics: Financial Restatements",
+              "Compustat: Fundamentals Annual (with company header)", "I/B/E/S: Detail EPS (unadjusted)",
+              "I/B/E/S: Actual EPS (unadjusted)", "I/B/E/S: Summary EPS (unadjusted)",
+              "CRSP: Monthly Stock File (CIZ)", "CRSP-Compustat: CCM Link Table", "I/B/E/S-CRSP: Link Table"),
+  `WRDS table` = c("audit_audit_comp.feed11_sox_404_internal_controls",
+                   readRDS("data/restate_table_name.rds"),
+                   "comp.funda, comp.company", "ibes.detu_epsus", "ibes.actu_epsus",
+                   "ibes.statsumu_epsus", "crsp.msf_v2", "crsp.ccmxpf_lnkhist",
+                   "wrdsapps_link_crsp_ibes.ibcrsphist"),
+  Variables = c("Company ID, fiscal year end, effectiveness, opinion type, weakness count",
+                "Company ID, restated period, filing date, restatement type",
+                "Assets, sales, receivables, PPE, income, cash flow, debt, equity; CIK, SIC",
+                "Analyst, ticker, forecast EPS, forecast date, forecast period",
+                "Ticker, actual EPS, fiscal period, announcement date",
+                "Ticker, median consensus, number of analysts, forecast period",
+                "PERMNO, date, return, share price, shares outstanding",
+                "GVKEY, PERMNO, link dates", "I/B/E/S ticker, PERMNO, link dates"),
+  Purpose = c("H1, H3", "H2, H4", "H1, H2, controls", "H3, H4 (robustness)", "H3, H4", "H3, H4",
+              "H3, H4, controls", "Compustat-CRSP matching", "I/B/E/S-CRSP matching"),
+  check.names = FALSE)
+kable(sources, format = "latex", booktabs = TRUE,
+      caption = "The nine datasets used in this project (all accessed through WRDS)") %>%
+  kable_styling(latex_options = "hold_position", font_size = 7.5) %>%
+  column_spec(2, width = "3.6cm") %>%
+  column_spec(3, width = "3.6cm", monospace = TRUE) %>%
+  column_spec(4, width = "4.4cm") %>%
+  column_spec(5, width = "2.2cm")
+```
+
+The data are cited as @data_aa, @data_comp, @data_crsp, @data_ibes and @data_iclink.
+
+## Linking the databases
+
+Each database uses a different firm identifier, so a big part of the work was linking them together:
+
+* **Audit Analytics to Compustat:** Audit Analytics' `company_fkey` is the SEC CIK, which Compustat also reports. SOX 404 reports are assigned to a fiscal year with the Compustat rule that fiscal years ending in January to May belong to the previous year.
+* **Compustat to CRSP:** the CCM link table (`LU`/`LC` links, primary `P` or `C`) that is valid on the fiscal year-end date.
+* **I/B/E/S to CRSP:** the WRDS I/B/E/S-CRSP link with a match score of 2 or better, valid on the forecast period end.
+* **I/B/E/S to Compustat:** through PERMNO, matching the I/B/E/S fiscal period end month to the Compustat fiscal year-end month.
+
+## Sample selection
+
+```{r tab-sample}
+sample_steps <- data.frame(
+  Step = c(paste0("Compustat firm-years, fiscal ", start_year, "-", end_year),
+           "Drop financial firms and utilities",
+           "Lagged assets of at least $1 million and non-missing accrual inputs",
+           "At least 10 firms in the industry-year (accrual model can be estimated)",
+           "Matched to an Audit Analytics SOX 404 report",
+           "Matched to CRSP with non-missing controls: earnings-management sample",
+           "I/B/E/S firm-years with consensus and actual EPS (before matching)",
+           "Matched to the earnings-management sample, price of at least $1: forecast sample"),
+  `Firm-years` = format(c(n_comp, n_nonfin, n_accr, n_da, n_aa, n_em, n_ibes_all, n_af), big.mark = ","),
+  check.names = FALSE)
+kable(sample_steps, format = "latex", booktabs = TRUE, align = c("l", "r"),
+      caption = "Sample selection") %>%
+  kable_styling(latex_options = "hold_position", font_size = 9) %>%
+  row_spec(c(6, 8), bold = TRUE)
+```
+
+Table \ref{tab:tab-sample} shows how we got to our final samples. Because we need CRSP data, firms that only trade over the counter drop out. Quite a lot of these very small firms report weaknesses, so our sample is tilted towards bigger listed firms. Also, restatements for the last two years (`r end_year - 1` and `r end_year`) may not have been found yet, and we deal with this in Section 8.
+
+## Variable measurement
+
+**Earnings management.** Following @hribar2002 we measure total accruals from the cash-flow statement, scaled by lagged total assets: $TA = (IB - (OANCF - XIDOC)) / A_{t-1}$. For each two-digit SIC industry and year with at least ten firms we estimate the modified Jones model [@jones1991; @dechow1995]:
+$$TA_{it} = \alpha + \beta_1 \frac{1}{A_{i,t-1}} + \beta_2 \frac{\Delta REV_{it} - \Delta REC_{it}}{A_{i,t-1}} + \beta_3 \frac{PPE_{it}}{A_{i,t-1}} + \varepsilon_{it}$$
+The residual is the discretionary accrual (DA), the part of accruals that sales growth and fixed assets cannot explain. Our main measure is its absolute value, ABS_DA, which captures earnings management in either direction. As a robustness check we add ROA to the model (ABS_DA_ROA), following the idea of @kothari2005 that firm performance should be controlled for.
+
+**Analyst forecast error.** For each firm-year we take the last I/B/E/S median consensus forecast of annual EPS issued on or before the fiscal year-end and compare it with actual EPS: $FE = 100 \times |ACTUAL - MEDEST| / PRICE$, where PRICE is the CRSP share price in the month of the forecast. We use the *unadjusted* I/B/E/S files so that the forecast, the actual and the price are all on the same per-share basis [@payne2003]. DISP is the standard deviation of analysts' forecasts scaled the same way (two or more analysts needed). BIAS is the signed error; negative values mean analysts were too optimistic. As a robustness check we also build our own consensus from the I/B/E/S *Detail* file: we keep each analyst's latest forecast issued in the 90 days before the fiscal year-end and take the median across analysts (FEDET). In the forecast regressions firm size is measured by market value from CRSP (share price times shares outstanding, LOGMV), because market value reflects what investors and analysts see.
+
+**Opinion type, weakness count and restatement type.** Audit Analytics reports whether each SOX 404 opinion comes from the auditor (SOX 404(b), required for larger "accelerated" filers) or from management alone (SOX 404(a)). MWAUD marks weaknesses confirmed by an auditor and MWMGT weaknesses reported by management only. LOGNWEAK uses the number of weaknesses disclosed as a measure of how severe the control problem is. For restatements, RESSER marks misstated years whose restatement involved fraud or had an adverse effect on the financial statements, and RESOTH marks all other restated years.
+
+```{r tab-vars}
+var_def <- data.frame(
+  Variable = c("ABS_DA", "ABS_DA_ROA", "MW", "MWAUD", "MWMGT", "LOGNWEAK",
+               "RESTATE", "RESSER", "RESOTH", "RESANN", "FE", "FEDET", "DISP", "BIAS",
+               "SIZE", "LOGMV", "LEV", "MTB", "ROA", "LOSS", "SGROWTH", "CFO", "RETVOL", "LNUMEST"),
+  Definition = c("Absolute residual of the modified Jones model",
+                 "Absolute residual of the modified Jones model with ROA added",
+                 "1 if a SOX 404 report says ICFR is not effective",
+                 "1 if the auditor's SOX 404(b) opinion reports a material weakness",
+                 "1 if a material weakness is reported by management only",
+                 "Log of 1 + number of material weaknesses disclosed",
+                 "1 if the fiscal year was later restated",
+                 "1 if restated and the restatement involved fraud or an adverse effect",
+                 "1 if restated but not a serious restatement (RESTATE - RESSER)",
+                 "1 if a restatement was announced during the fiscal year",
+                 "100 x |actual EPS - median forecast| / price (I/B/E/S Summary)",
+                 "Same as FE, using the median of analysts' latest forecasts (I/B/E/S Detail)",
+                 "100 x standard deviation of forecasts / price",
+                 "100 x (actual EPS - median forecast) / price",
+                 "Log of total assets", "Log of market value: CRSP price x shares outstanding",
+                 "Total liabilities / total assets",
+                 "Market value of equity / book value of equity",
+                 "Income before extraordinary items / lagged assets",
+                 "1 if income before extraordinary items is negative",
+                 "Sales growth", "Operating cash flow / lagged assets",
+                 "Standard deviation of monthly stock returns in the fiscal year (CRSP)",
+                 "Log of the number of analysts"))
+kable(var_def, format = "latex", booktabs = TRUE,
+      caption = "Variable definitions") %>%
+  kable_styling(latex_options = "hold_position", font_size = 8.5)
+```
+
+All continuous variables are winsorised at the 1st and 99th percentiles to limit the influence of extreme values. All regressions include year and two-digit SIC industry dummies (fixed effects).
+
+# Overview of the data
+
+## Summary statistics
+
+```{r tab-desc}
+desc_vars <- c("ABS_DA", "ABS_DA_ROA", "DA", "MW", "MWAUD", "MWMGT", "NWEAK", "RESTATE",
+               "RESSER", "RESANN", "SIZE", "LEV", "MTB", "ROA", "LOSS", "SGROWTH", "CFO", "RETVOL")
+desc_em <- em %>%
+  select(ABS_DA, ABS_DA_ROA, DA, MW, MWAUD, MWMGT, NWEAK, RESTATE, RESSER, RESANN,
+         SIZE, LEV, MTB, ROA, LOSS, SGROWTH, CFO, RETVOL) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "value") %>%
+  group_by(Variable) %>%
+  summarize(N = n(), Mean = mean(value), SD = sd(value),
+            P25 = quantile(value, 0.25), Median = median(value), P75 = quantile(value, 0.75)) %>%
+  mutate(Variable = factor(Variable, levels = desc_vars)) %>%
+  arrange(Variable) %>%
+  mutate(Variable = as.character(Variable))
+
+desc_af <- af %>%
+  select(FE, FEDET, DISP, BIAS, numest, LOGMV) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "value") %>%
+  filter(!is.na(value)) %>%
+  group_by(Variable) %>%
+  summarize(N = n(), Mean = mean(value), SD = sd(value),
+            P25 = quantile(value, 0.25), Median = median(value), P75 = quantile(value, 0.75))
+
+kable(bind_rows(desc_em, desc_af), format = "latex", booktabs = TRUE, digits = 3,
+      format.args = list(big.mark = ","),
+      caption = "Descriptive statistics") %>%
+  kable_styling(latex_options = "hold_position", font_size = 8.5) %>%
+  pack_rows("Earnings-management sample", 1, nrow(desc_em)) %>%
+  pack_rows("Analyst-forecast sample", nrow(desc_em) + 1, nrow(desc_em) + nrow(desc_af))
+```
+
+Table \ref{tab:tab-desc} describes both samples. The mean ABS_DA is `r round(mean(em$ABS_DA), 3)`, so discretionary accruals average about `r round(100 * mean(em$ABS_DA), 1)`% of lagged total assets. The median (`r round(median(em$ABS_DA), 3)`) is below the mean, which shows the distribution has a long right tail. In the forecast sample the median forecast error is `r round(median(af$FE), 2)`% of the share price while the mean is `r round(mean(af$FE), 2)`%, again because of a few very large misses.
+
+## Material weaknesses and restatements over time
+
+```{r fig-trend, fig.cap="\\label{fig:trend}Share of firm-years with a material weakness or a restatement, by fiscal year."}
+em %>%
+  group_by(fyear) %>%
+  summarize(`Material weakness` = mean(MW),
+            `Misstated year (later restated)` = mean(RESTATE),
+            `Restatement announced in year` = mean(RESANN)) %>%
+  pivot_longer(-fyear, names_to = "Measure", values_to = "share") %>%
+  ggplot(aes(x = fyear, y = share, color = Measure)) +
+  geom_line(linewidth = 1) +
+  geom_point() +
+  scale_y_continuous(labels = scales::percent) +
+  scale_x_continuous(breaks = start_year:end_year) +
+  labs(x = "Fiscal year", y = "Share of firm-years", color = NULL) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+
+Figure \ref{fig:trend} shows how often each problem occurs. The material weakness rate is `r round(100 * mean(em$MW[em$fyear == start_year]), 1)`% in `r start_year` and `r round(100 * mean(em$MW[em$fyear == end_year]), 1)`% in `r end_year`. The share of misstated years is `r round(100 * mean(em$RESTATE[em$fyear == start_year]), 1)`% in `r start_year` and `r round(100 * mean(em$RESTATE[em$fyear == end_year]), 1)`% in `r end_year`. A low rate at the end of the sample should be read with care: errors take time to be found and announced, so the most recent years are under-counted.
+
+## Comparing firms with and without reporting problems
+
+```{r fig-box, fig.cap="\\label{fig:box}Distribution of absolute discretionary accruals (log scale) for firms with and without each reporting problem.", fig.height=3.6}
+bind_rows(
+  em %>% select(ABS_DA, Group = MW_group) %>% mutate(Problem = "Material weakness"),
+  em %>% select(ABS_DA, Group = RES_group) %>% mutate(Problem = "Restatement")) %>%
+  ggplot(aes(x = Group, y = ABS_DA)) +
+  geom_boxplot(fill = "lightblue") +
+  scale_y_log10() +
+  facet_wrap(~ Problem, scales = "free_x") +
+  labs(x = NULL, y = "ABS_DA (log scale)") +
+  theme_bw()
+```
+
+```{r tab-ttest}
+ttest_rows <- NULL
+for (g in c("MW", "RESTATE")) {
+  for (v in c("ABS_DA", "ABS_DA_ROA", "SIZE", "LOSS", "RETVOL", "FE", "DISP")) {
+    d <- if (v %in% c("FE", "DISP")) af else em
+    yes <- d[[v]][d[[g]] == 1]
+    no  <- d[[v]][d[[g]] == 0]
+    tt <- tidy(t.test(yes, no))
+    ttest_rows <- bind_rows(ttest_rows,
+      data.frame(Group = g, Variable = v, `Mean (=1)` = tt$estimate1, `Mean (=0)` = tt$estimate2,
+                 Difference = tt$estimate, `t-stat` = tt$statistic, `p-value` = tt$p.value,
+                 check.names = FALSE))
+  }
+}
+kable(ttest_rows %>% select(-Group), format = "latex", booktabs = TRUE, digits = 3, row.names = FALSE,
+      caption = "Mean comparisons (Welch two-sample t-tests)") %>%
+  kable_styling(latex_options = "hold_position", font_size = 8.5) %>%
+  pack_rows("MW = 1 vs. MW = 0", 1, 7) %>%
+  pack_rows("RESTATE = 1 vs. RESTATE = 0", 8, 14)
+```
+
+Figure \ref{fig:box} and Table \ref{tab:tab-ttest} compare the groups without any controls. Firms with a material weakness have a mean ABS_DA of `r round(mean(em$ABS_DA[em$MW == 1]), 3)` compared with `r round(mean(em$ABS_DA[em$MW == 0]), 3)` for other firms. The table also shows why we need control variables: MW firms have a mean SIZE of `r round(mean(em$SIZE[em$MW == 1]), 2)` against `r round(mean(em$SIZE[em$MW == 0]), 2)`, and they report a loss in `r round(100 * mean(em$LOSS[em$MW == 1]), 1)`% of years against `r round(100 * mean(em$LOSS[em$MW == 0]), 1)`%. Small and loss-making firms naturally have larger accruals and are harder to forecast, so a raw difference could come from firm characteristics rather than from the reporting problem itself.
+
+# Results: earnings management (H1 and H2)
+
+```{r tab-em, results="asis"}
+stargazer(em1, em2, em3, em4,
+          header = FALSE, no.space = TRUE, font.size = "footnotesize",
+          table.placement = "H", label = "tab:em",
+          title = "Material weaknesses, restatements and absolute discretionary accruals",
+          dep.var.labels = c("ABS\\_DA", "ABS\\_DA\\_ROA"),
+          omit = "factor", omit.stat = c("f", "ser"),
+          add.lines = fe_lines(4))
+```
+
+Table \ref{tab:em} reports the regressions. Column (1) includes only MW, column (2) only RESTATE, and column (3) both. In column (3) the MW coefficient is `r result_text(em3, "MW")` (`r round(est(em3, "MW"), 4)`, t = `r round(tval(em3, "MW"), 2)`), so **H1 is `r tolower(supported(em3, "MW"))`**. The RESTATE coefficient is `r result_text(em3, "RESTATE")` (`r round(est(em3, "RESTATE"), 4)`, t = `r round(tval(em3, "RESTATE"), 2)`), so **H2 is `r tolower(supported(em3, "RESTATE"))`**. To judge the size of the effect, the MW coefficient equals `r round(100 * est(em3, "MW") / mean(em$ABS_DA), 1)`% of the average ABS_DA and the RESTATE coefficient equals `r round(100 * est(em3, "RESTATE") / mean(em$ABS_DA), 1)`%.
+
+Column (4) uses the ROA-adjusted measure. Here the MW coefficient is `r result_text(em4, "MW")` (t = `r round(tval(em4, "MW"), 2)`) and the RESTATE coefficient is `r result_text(em4, "RESTATE")` (t = `r round(tval(em4, "RESTATE"), 2)`). This check matters because MW firms more often make losses, and the basic Jones model can mistake poor performance for discretion [@kothari2005].
+
+The control variables can be compared with earlier studies. In column (3) the coefficient on SIZE is `r round(est(em3, "SIZE"), 4)` (t = `r round(tval(em3, "SIZE"), 2)`), on LOSS `r round(est(em3, "LOSS"), 4)` (t = `r round(tval(em3, "LOSS"), 2)`) and on RETVOL `r round(est(em3, "RETVOL"), 4)` (t = `r round(tval(em3, "RETVOL"), 2)`). Earlier research finds that smaller, loss-making and more volatile firms have larger discretionary accruals.
+
+## Noise or manipulation? The direction of accruals
+
+```{r tab-sign, results="asis"}
+stargazer(sg1, sg2, sg3,
+          header = FALSE, no.space = TRUE, font.size = "footnotesize",
+          table.placement = "H", label = "tab:sign",
+          title = "Signed accruals, income-increasing and income-decreasing accruals",
+          dep.var.labels = c("DA (signed)", "ABS\\_DA"),
+          column.labels = c("All", "DA > 0", "DA < 0"),
+          omit = "factor", omit.stat = c("f", "ser"),
+          add.lines = fe_lines(3))
+```
+
+ABS_DA cannot tell us *why* accruals are large. If MW firms deliberately inflate profits, the effect should appear mainly in income-increasing accruals and the signed regression should give a positive MW coefficient. If weak controls simply let more errors through, accruals should be larger in *both* directions. Table \ref{tab:sign} tests this. In the signed regression (column 1) the MW coefficient is `r result_text(sg1, "MW")` (t = `r round(tval(sg1, "MW"), 2)`). Among income-increasing accruals (column 2) it is `r result_text(sg2, "MW")` (t = `r round(tval(sg2, "MW"), 2)`), and among income-decreasing accruals (column 3) it is `r result_text(sg3, "MW")` (t = `r round(tval(sg3, "MW"), 2)`). `r ifelse(supported(sg2, "MW") == "Supported" & supported(sg3, "MW") == "Supported", "Because MW firms have larger accruals on both sides of zero, the evidence matches @ashbaugh2008: weak internal controls seem to let unintentional errors through rather than produce one-directional manipulation.", ifelse(supported(sg2, "MW") == "Supported", "Because the effect is concentrated in income-increasing accruals, the evidence points more towards deliberate upward earnings management.", "The split by sign does not give a clear pattern, so this test cannot separate the error and manipulation explanations."))`
+
+# Results: analyst forecasts (H3 and H4)
+
+```{r tab-af, results="asis"}
+stargazer(af1, af2, af3, af4, af5,
+          header = FALSE, no.space = TRUE, font.size = "footnotesize",
+          table.placement = "H", label = "tab:af",
+          title = "Material weaknesses, restatements and analyst forecasts",
+          dep.var.labels = c("Forecast error (FE)", "Dispersion", "Bias"),
+          omit = "factor", omit.stat = c("f", "ser"),
+          add.lines = fe_lines(5))
+```
+
+Table \ref{tab:af} turns to analysts. In column (3), with both indicators, the MW coefficient is `r result_text(af3, "MW")` (`r round(est(af3, "MW"), 3)`, t = `r round(tval(af3, "MW"), 2)`), so **H3 is `r tolower(supported(af3, "MW"))`**. The RESTATE coefficient is `r result_text(af3, "RESTATE")` (`r round(est(af3, "RESTATE"), 3)`, t = `r round(tval(af3, "RESTATE"), 2)`), so **H4 is `r tolower(supported(af3, "RESTATE"))`**. Compared with the average forecast error of `r round(mean(af$FE), 3)`% of price, the MW coefficient is `r round(100 * est(af3, "MW") / mean(af$FE), 1)`% of the mean and the RESTATE coefficient `r round(100 * est(af3, "RESTATE") / mean(af$FE), 1)`%. The coefficient on LNUMEST is `r round(est(af3, "LNUMEST"), 3)` (t = `r round(tval(af3, "LNUMEST"), 2)`). @lang1996 argue that firms followed by more analysts have richer information environments and should be easier to forecast.
+
+Columns (4) and (5) show *how* forecasts are affected. For dispersion the MW coefficient is `r round(est(af4, "MW"), 3)` (t = `r round(tval(af4, "MW"), 2)`); a positive value means analysts disagree more about MW firms. For bias the MW coefficient is `r round(est(af5, "MW"), 3)` (t = `r round(tval(af5, "MW"), 2)`) and the RESTATE coefficient `r round(est(af5, "RESTATE"), 3)` (t = `r round(tval(af5, "RESTATE"), 2)`). A negative bias coefficient would mean analysts are too optimistic about problem firms, because they do not fully expect the charges and corrections that weak controls and restatements bring.
+
+```{r fig-coef, fig.cap="\\label{fig:coef}MW and RESTATE coefficients with 95\\% confidence intervals (all controls and fixed effects included). Points to the right of zero support the hypotheses.", fig.height=3.6}
+coefs <- bind_rows(
+  tidy(em3, conf.int = TRUE) %>% mutate(Model = "ABS_DA"),
+  tidy(em4, conf.int = TRUE) %>% mutate(Model = "ABS_DA_ROA"),
+  tidy(af3, conf.int = TRUE) %>% mutate(Model = "Forecast error"),
+  tidy(af4, conf.int = TRUE) %>% mutate(Model = "Dispersion")) %>%
+  filter(term %in% c("MW", "RESTATE")) %>%
+  mutate(Panel = ifelse(Model %in% c("ABS_DA", "ABS_DA_ROA"), "Earnings management", "Analyst forecasts"))
+
+ggplot(coefs, aes(x = Model, y = estimate, color = term)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_point(position = position_dodge(width = 0.5), size = 2) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high),
+                position = position_dodge(width = 0.5), width = 0.2) +
+  coord_flip() +
+  facet_wrap(~ Panel, scales = "free") +
+  labs(x = NULL, y = "Coefficient estimate", color = NULL) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+
+Figure \ref{fig:coef} puts the main estimates side by side. A confidence interval that does not cross the dashed zero line is significant at the 5% level.
+
+# Robustness
+
+```{r tab-rob, results="asis"}
+stargazer(rb1, rb2, rb3, rb4,
+          header = FALSE, no.space = TRUE, font.size = "footnotesize",
+          table.placement = "H", label = "tab:rob",
+          title = "Robustness: announcement-year restatements and dropping the most recent years",
+          dep.var.labels = c("ABS\\_DA", "Forecast error (FE)"),
+          column.labels = c("Announced", paste0("To ", end_year - 2), "Announced", paste0("To ", end_year - 2)),
+          keep = c("^MW$", "^RESTATE$", "^RESANN$"), omit.stat = c("f", "ser"),
+          add.lines = c(list(c("Controls", rep("Yes", 4))), fe_lines(4)))
+```
+
+Table \ref{tab:rob} checks two choices.
+
+*Timing of restatements.* Our main RESTATE variable marks the year that was wrong, but investors and analysts only learn about the problem when the restatement is announced. Using the announcement year instead (columns 1 and 3), the RESANN coefficient is `r round(est(rb1, "RESANN"), 4)` (t = `r round(tval(rb1, "RESANN"), 2)`) for ABS_DA and `r round(est(rb3, "RESANN"), 3)` (t = `r round(tval(rb3, "RESANN"), 2)`) for forecast error.
+
+*Restatements not yet discovered.* Misstatements in `r end_year - 1` and `r end_year` may not have been restated yet, so some misstated years are wrongly coded as zero. Dropping these two years (columns 2 and 4), the RESTATE coefficient is `r round(est(rb2, "RESTATE"), 4)` (t = `r round(tval(rb2, "RESTATE"), 2)`) for ABS_DA and `r round(est(rb4, "RESTATE"), 3)` (t = `r round(tval(rb4, "RESTATE"), 2)`) for forecast error.
+
+## Opinion type, weakness count, restatement type and analyst-level data
+
+```{r tab-add, results="asis"}
+stargazer(ad1, ad2, ad3, ad4, ad5,
+          header = FALSE, no.space = TRUE, font.size = "footnotesize",
+          table.placement = "H", label = "tab:add",
+          title = "Additional tests using opinion type, weakness count, restatement type and I/B/E/S Detail",
+          dep.var.labels = c("ABS\\_DA", "Forecast error (FE)", "FE from Detail"),
+          keep = c("^MW$", "^MWAUD$", "^MWMGT$", "^LOGNWEAK$", "^RESTATE$", "^RESSER$", "^RESOTH$"),
+          omit.stat = c("f", "ser"),
+          add.lines = c(list(c("Controls", rep("Yes", 5))), fe_lines(5)))
+```
+
+The extra variables from the nine datasets let us look inside the main results (Table \ref{tab:add}).
+
+*Who reports the weakness.* In column (1), weaknesses confirmed by an auditor (MWAUD) have a coefficient of `r round(est(ad1, "MWAUD"), 4)` (t = `r round(tval(ad1, "MWAUD"), 2)`) and weaknesses reported by management only (MWMGT) have `r round(est(ad1, "MWMGT"), 4)` (t = `r round(tval(ad1, "MWMGT"), 2)`). Management-only reports come mostly from smaller firms that are exempt from an auditor's SOX 404(b) opinion, so a larger MWMGT coefficient would suggest that problems are greatest where nobody outside the firm checks the controls.
+
+*How many weaknesses.* In column (2), the coefficient on LOGNWEAK is `r round(est(ad2, "LOGNWEAK"), 4)` (t = `r round(tval(ad2, "LOGNWEAK"), 2)`). A positive coefficient means that discretionary accruals rise with the number of weaknesses disclosed, so it is the severity of the control problem, not only its presence, that matters.
+
+*Type of restatement.* In column (3), serious restatements (fraud or adverse effect, RESSER) have a coefficient of `r round(est(ad3, "RESSER"), 4)` (t = `r round(tval(ad3, "RESSER"), 2)`) and other restatements (RESOTH) have `r round(est(ad3, "RESOTH"), 4)` (t = `r round(tval(ad3, "RESOTH"), 2)`). For analysts (column 4), the coefficients are `r round(est(ad4, "RESSER"), 3)` (t = `r round(tval(ad4, "RESSER"), 2)`) for serious and `r round(est(ad4, "RESOTH"), 3)` (t = `r round(tval(ad4, "RESOTH"), 2)`) for other restatements. In the same regression, auditor-confirmed weaknesses have a coefficient of `r round(est(ad4, "MWAUD"), 3)` (t = `r round(tval(ad4, "MWAUD"), 2)`) and management-only weaknesses `r round(est(ad4, "MWMGT"), 3)` (t = `r round(tval(ad4, "MWMGT"), 2)`).
+
+*Our own consensus from I/B/E/S Detail.* Column (5) repeats the main forecast test using the median of each analyst's latest forecast in the 90 days before the year-end (`r format(sum(!is.na(af$FEDET)), big.mark = ",")` firm-years). The MW coefficient is `r result_text(ad5, "MW")` (`r round(est(ad5, "MW"), 3)`, t = `r round(tval(ad5, "MW"), 2)`) and the RESTATE coefficient is `r result_text(ad5, "RESTATE")` (`r round(est(ad5, "RESTATE"), 3)`, t = `r round(tval(ad5, "RESTATE"), 2)`). Because this consensus drops stale forecasts that the summary file may still include, it checks that the H3 and H4 results do not come from out-of-date forecasts.
+
+# Discussion
+
+```{r tab-summary}
+hyp <- data.frame(
+  Hypothesis = c("H1: MW -> higher ABS_DA", "H2: RESTATE -> higher ABS_DA",
+                 "H3: MW -> larger forecast error", "H4: RESTATE -> larger forecast error"),
+  Coefficient = c(est(em3, "MW"), est(em3, "RESTATE"), est(af3, "MW"), est(af3, "RESTATE")),
+  `t-stat` = c(tval(em3, "MW"), tval(em3, "RESTATE"), tval(af3, "MW"), tval(af3, "RESTATE")),
+  Result = c(supported(em3, "MW"), supported(em3, "RESTATE"), supported(af3, "MW"), supported(af3, "RESTATE")),
+  check.names = FALSE)
+kable(hyp, format = "latex", booktabs = TRUE, digits = 3,
+      caption = "Summary of hypothesis tests (column 3 of the main tables, 10% level)") %>%
+  kable_styling(latex_options = "hold_position", font_size = 9)
+```
+
+Table \ref{tab:tab-summary} puts the four tests together. One thing we want to be careful about is that these are associations after controlling for firm characteristics. They don't prove that weak controls or restatements *cause* these outcomes. With that in mind, there are three main takeaways for us.
+
+1. **Accrual quality.** `r ifelse(supported(em3, "MW") == "Supported" | supported(em3, "RESTATE") == "Supported", "Audit-related outcomes carry information about the reliability of a firm's accruals beyond size, performance and risk. For a reader of financial statements, the earnings of firms with these problems deserve extra scrutiny.", "Once firm characteristics are controlled for, audit-related outcomes add little to explaining discretionary accruals in our sample. Possible reasons are that the accrual model is too noisy to detect the effect, or that in recent years most weaknesses are less severe, account-specific problems rather than the company-wide failures studied by @doyle2007aq.")`
+2. **Analyst forecasts.** `r ifelse(supported(af3, "MW") == "Supported" | supported(af3, "RESTATE") == "Supported", "Analysts make larger errors for firms with reporting problems, so for these firms the consensus forecast is a weaker guide for investors.", "We find no clear evidence that analysts forecast less accurately for firms with reporting problems once size, coverage and risk are controlled for. Analysts may already treat these firms as risky, or the I/B/E/S 'street' EPS may exclude the one-off charges that weak controls and restatements produce.")` Comparing accuracy, dispersion and bias shows whether analysts are only less precise or are also systematically surprised.
+3. **Research design choices matter.** When we changed how the restatement variable is timed, or adjusted the accrual model for performance, the size of the estimates changed. Before doing this project we didn't expect small choices like this to matter so much, and we think they should always be reported clearly.
+
+**Limitations.** Our study has a few limitations. First, there could be omitted variables. For example, complex firms might have both weak controls and naturally large accruals, and our controls and fixed effects only partly deal with this. A good next step would be to compare the same firm before and after a weakness is disclosed or fixed [@ashbaugh2008]. Second, we can only see weaknesses and misstatements that were actually *disclosed*, and whether a firm discloses depends on its characteristics [@doyle2007det]. Third, accrual models are a noisy way to measure earnings management [@dechow2010]. Fourth, we used normal OLS standard errors. Since the same firm shows up in several years, standard errors clustered by firm would probably be a bit larger, which we didn't cover in this course. Lastly, firms without CRSP data are left out, so our results mainly describe listed firms.
+
+# How we used R
+
+Everything in this project is done in one R Markdown file, so all the numbers, tables and figures can be reproduced just by knitting it. The full code is in the Appendix. We tried to stick to the tools we learned in the course:
+
+* **Getting the data.** We connected to WRDS with `dbConnect()` from `DBI` and `RPostgres`, and then used `tbl()`, `in_schema()`, `filter()`, `select()` and `collect()` from `dbplyr`, the same way as in Tutorial 3. This way only the rows and columns we need get downloaded. We saved each table with `saveRDS()` so we didn't have to download it again every time we knitted.
+* **Cleaning and merging.** Most variables were built with the main `dplyr` verbs (`filter`, `arrange`, `select`, `mutate`, `summarize`) together with `group_by()`. We used `lag()` to get last year's assets and sales. `left_join()` and `inner_join()` merged Compustat, CRSP, I/B/E/S and Audit Analytics through the linking tables, and then we used `filter()` to keep only links that were valid on the right date. `distinct()` and `slice_max()` removed duplicates and picked the latest consensus forecast, and `case_when()` coded the material weakness variable.
+* **Estimating discretionary accruals.** We needed one regression for every industry-year, which is hundreds of regressions. We did this with `group_by() %>% nest()` and `map()` with `lm()`, like the "separate regressions for each cyl" example from class, and then kept the residuals with `resid()`.
+* **Testing the hypotheses.** We used `t.test()` with `broom::tidy()` for the mean comparisons. For the regressions we used `lm()` with `factor(fyear)` and `factor(sic2)` to add year and industry fixed effects, and `tidy()` to pull out the numbers we quote in the text.
+* **Reporting.** The regression tables come from `stargazer()`, the other tables from `kable()` and `kableExtra`, and the figures from `ggplot2` (`geom_line`, `geom_boxplot`, `geom_point` with `geom_errorbar`, `facet_wrap`). The numbers in the text are written as inline R code, so the text updates by itself if the data change.
+
+Honestly, the biggest thing we learned is that most of the work was in getting the data ready, not in running the regressions. We ran into quite a few problems along the way. The restatement table had a different name in our WRDS account than we expected, so we had to look it up from WRDS directly. CRSP stopped updating its old monthly file after 2024, so we had to switch to the new CIZ format to cover 2025. We also had to think about stock splits, because forecasts, actual EPS and prices need to be on the same per-share basis. Each of these small decisions changed our sample, and Table \ref{tab:tab-sample} keeps track of how many firm-years we lost at each step.
+
+\newpage
+
+# References
+
+::: {#refs}
+:::
+
+\newpage
+
+# Appendix: R code {-}
+
+```{r code-appendix, ref.label = knitr::all_labels(), echo = TRUE, eval = FALSE}
+```
